@@ -1,123 +1,170 @@
 # BOREAS: Action-Conditioned World Modeling for Data Center Cooling Systems
 
-<p align="center">
-  <b>A learning-based digital twin for recursive simulation of data-center cooling dynamics under control actions and IT workloads.</b>
-</p>
-
-<p align="center">
-  <a href="https://huggingface.co/datasets/Fine6868/BOREAS"><b>Dataset</b></a>
-</p>
-
-<p align="center">
-  <img src="assets/figure2_boreas_overview.png" width="100%" alt="Overview of the BOREAS framework">
-</p>
+BOREAS is a probabilistic, action-conditioned world model for forecasting and simulating the thermal dynamics of data center cooling systems. It is designed to support counterfactual action evaluation, multi-step rollout simulation, and downstream control-policy assessment.
 
 ## Overview
 
-**BOREAS** is an action-conditioned world model for data-center cooling systems. It learns controlled thermal dynamics directly from operational telemetry and recursively predicts future thermal states under specified cooling-control and IT-workload sequences.
+Data center cooling is governed by coupled thermal, airflow, and control dynamics. A useful world model must therefore capture:
 
-The model is designed around three challenges in real-world cooling-system modeling:
+- spatial interactions among thermal entities;
+- recurrent temporal dependencies;
+- the effect of alternative cooling actions;
+- exogenous workload variations; and
+- uncertainty in future thermal-state transitions.
 
-- **Heterogeneous spatial interactions:** temperature/humidity sensors and air-conditioning units (ACUs) have different physical roles and feature spaces.
-- **History dependence:** partially observed thermal dynamics depend on recent operating history, control actions, and workload conditions.
-- **Action-response learning:** strong thermal inertia can make a predictor rely on past temperatures while underusing control information.
+Given the current recurrent memory state \(m_t\), a candidate action \(a_t\), and the observed exogenous workload \(\xi_t\), BOREAS predicts the probability distribution of the normalized observation increment
 
-BOREAS addresses these challenges with a **Heterogeneous-Entity Thermal Interaction Encoder**, a **Recurrent Thermal-Context Updater**, a probabilistic **Thermal-Dynamics Transition Model**, and an auxiliary **Inverse-Dynamics Representation Regularization (IDRR)** objective.
+\[
+\Delta o_t = o_{t+1} - o_t.
+\]
 
-## Motivation
+The predicted observation is then fed back as the next input during recursive simulation. This enables BOREAS to evaluate how different control actions may affect future thermal states over multiple prediction steps.
 
-Evaluating cooling strategies directly in a production data center can be costly and risky. A learned digital twin provides a way to model how thermal states evolve under control inputs before actions are deployed in the physical system.
+The model follows an Update--Predict architecture:
 
-<p align="center">
-  <img src="assets/figure1_digital_twin.png" width="95%" alt="Schematic of a data-center cooling digital twin">
-</p>
+1. **HETI encoder.** The Heterogeneous Entity Thermal Interaction encoder represents interactions among data-center entities and produces a graph-based thermal representation.
 
-The released operational dataset contains synchronized thermal observations, cooling-control signals, and IT workloads collected from a real-world data-center cooling system. After data cleaning, the study uses **64,825 valid state transitions** sampled at **5-minute intervals**.
+2. **RTCU updater.** The Recurrent Thermal-Context Updater maintains a compact recurrent memory of the evolving thermal context.
 
-## Method
+3. **Transition head.** The transition head maps the current memory, action, and exogenous context to the mean and variance of the next observation increment.
 
-BOREAS separates thermal-state estimation from action-conditioned transition prediction.
+4. **Inverse-dynamics head.** An auxiliary inverse head reconstructs the action from the current memory state and the next observation. This explicitly constrains the action-related component of the state transition and improves action consistency during recursive rollout.
 
-### 1. Spatiotemporal Thermal Context Encoding
+## Task Definition
 
-At each time step, sensors and ACUs are represented as heterogeneous entities. Because explicit sensor-to-ACU adjacency is facility-specific, BOREAS does not prescribe a fixed graph topology. Instead, it applies **global self-attention across all entities** to learn interactions within and across entity types.
+The model predicts 46 output channels grouped into six physical categories:
 
-A **Recurrent Thermal-Context Updater (GRU)** then integrates:
+| Output group | Number of channels | Description |
+|---|---:|---|
+| Cold-T | 12 | Cold-aisle temperature |
+| Hot-T | 2 | Hot-aisle temperature |
+| Cold-RH | 12 | Cold-aisle relative humidity |
+| Hot-RH | 2 | Hot-aisle relative humidity |
+| ACU LAT | 9 | Air-conditioning unit leaving-air temperature |
+| ACU EAT | 9 | Air-conditioning unit entering-air temperature |
+| **Total** | **46** | Complete output vector |
 
-- the current heterogeneous-entity thermal representation,
-- the exogenous IT-workload embedding,
-- the preceding control action, and
-- the previous recurrent thermal context.
+The evaluation uses 10,985 contiguous test windows. Each window is initialized with eight historical observations for recurrent warm-up. During recursive rollout, predicted observations are fed back as the next model inputs, while the recorded future control signals and IT-load inputs are provided to all methods.
 
-The resulting latent state summarizes the current operating condition together with relevant thermal history.
+The evaluated horizons are:
 
-### 2. Probabilistic Controlled Thermal-Dynamics Prediction
+- \(H=1\): 5 minutes;
+- \(H=5\): 25 minutes;
+- \(H=10\): 50 minutes;
+- \(H=15\): 75 minutes.
 
-Conditioned on the current thermal context, the candidate control action, and the concurrent IT workload, BOREAS predicts a distribution over the **next observation increment** rather than directly predicting the absolute next state.
+Physical-scale RMSE and MAE are reported for each variable group. For cross-variable comparison, we use channel-standardized physical RMSE, denoted as **cs-pRMSE**, in which each channel is normalized by its training-set standard deviation before aggregation. Lower values indicate better performance.
 
-The predicted increment is added to the current observation to obtain the next thermal state, which can then be recursively fed back into the model for multi-step rollout.
+## Experimental Configuration
 
-### 3. Inverse-Dynamics Representation Regularization
+### Model Architecture
 
-To strengthen sensitivity to control actions, BOREAS introduces a training-only inverse-dynamics objective. The auxiliary head reconstructs control changes from the pre-intervention thermal context and the subsequent observation representation.
-
-This regularization encourages the learned state representation to preserve action-response information instead of explaining transitions primarily through thermal inertia.
-
-## Dataset
-
-The experiments use operational data collected from a production data center in Guangdong Province, China, from **January 1 to December 11, 2025**.
-
-| Item | Description |
+| Component | Configuration |
 |---|---|
-| Sampling interval | 5 minutes |
-| Valid state transitions | 64,825 |
-| Predicted thermal variables | 46 channels |
-| Cooling equipment | 9 ACUs |
-| Equipment-status signals | 9 |
-| Fan/valve control signals | 18 |
-| IT-load signals | 8 |
-| Data split | Chronological train/validation/test, approximately 7:1:2 |
+| Ensemble members | 5 |
+| HETI representation width | 64 |
+| Exogenous representation width | 64 |
+| HETI graph-network layers | 2 |
+| Attention heads | 4 |
+| RTCU/GRU hidden-state width | 256 |
+| Transition-head hidden width | 256 |
+| Transition-head depth | 1 layer |
+| Inverse-head hidden width | 256 |
+| Reported forward parameters | Approximately 3.619M |
 
-Dataset: **https://huggingface.co/datasets/Fine6868/BOREAS**
+### Training Objective
 
-## Experimental Results
+| Component | Configuration |
+|---|---|
+| Main objective | One-step observation-increment Gaussian negative log-likelihood |
+| Log-variance bound penalty | 0.01 |
+| Inverse-loss weight | 0.03 |
+| Inverse magnitude-loss weight | 1.0 |
+| Inverse positive-sample weight exponent | 1.0 |
+| Inverse-loss warm-up | First 1,000 updates |
+| Inverse-loss components | Prevalence-weighted BCE for nonzero-action detection and normalized Smooth L1 loss for nonzero-action magnitude |
+| Multi-step rollout loss | Not used in final training |
 
-BOREAS is evaluated against classical dynamics models and deep time-series forecasting baselines, including OLS-ARX, Ridge-ARX, DMDc, Subspace-SS, Kalman-SS, Informer, TSMixer, TimesNet, and LightTS.
+The inverse objective encourages the model to recover the action that caused the observed thermal transition. This provides an explicit action--state consistency constraint and helps reduce systematic drift during long-horizon recursive simulation.
 
-The main evaluation metric is **channel-standardized pooled RMSE (cs-pRMSE)**, which normalizes prediction errors using training-set channel scales before pooling across variables and rollout steps.
+### Optimization
 
-| Forecast horizon | Physical horizon | BOREAS cs-pRMSE |
-|---:|---:|---:|
-| 1 step | 5 min | **0.2145** |
-| 5 steps | 25 min | **0.4179** |
-| 10 steps | 50 min | **0.4605** |
-| 15 steps | 75 min | **0.4970** |
+| Setting | Value |
+|---|---:|
+| Optimizer | Adam |
+| Learning rate | \(10^{-3}\) |
+| Weight decay | \(10^{-5}\) |
+| Training batch size | 128 |
+| Validation batch size | 512 |
+| Gradient-norm clipping | 100 |
+| Maximum updates | 30,000 |
+| Validation frequency | Every 250 updates |
+| Early-stopping patience | 15 validation checks |
+| Minimum relative improvement | 0.001 |
 
-At the 5-minute horizon, BOREAS reduces cs-pRMSE by **16.4%** relative to the strongest dynamics baseline and **17.3%** relative to the strongest time-series baseline reported in the paper. At 75 minutes, the corresponding reductions are **26.0%** and **23.8%**.
+The final model is trained with a one-step probabilistic objective. Multi-step recursive rollout is used for evaluation and checkpoint selection rather than as a direct training loss.
 
-The recursive-rollout experiments initialize all methods with the same observation history, feed predicted observations back as subsequent inputs, and provide the recorded control inputs and IT-load trajectories at future steps.
+## Main Results
 
-## Ablation Findings
+The table reports overall cs-pRMSE across all 46 output channels. The \(H=1\) column measures single-step prediction, while \(H=5,10,15\) measure recursive rollout performance. Lower is better.
 
-The ablation study shows that the major components contribute in complementary ways:
+| Method | \(H=1\) (5 min) | \(H=5\) (25 min) | \(H=10\) (50 min) | \(H=15\) (75 min) |
+|---|---:|---:|---:|---:|
+| OLS--ARX | 0.2973 | 0.6263 | 0.8037 | 0.9293 |
+| Ridge--ARX | 0.2566 | 0.5509 | 0.7075 | 0.8246 |
+| DMDc | 0.3485 | 0.6228 | 0.7871 | 0.9171 |
+| Subspace-SS | 0.5666 | 0.6236 | 0.6480 | 0.6720 |
+| Kalman-SS | 0.4965 | 0.6544 | 0.7845 | 0.9171 |
+| Informer | 0.5926 | 0.8155 | 0.9210 | 0.9963 |
+| TSMixer | 0.2906 | 0.5534 | 0.6890 | 0.8108 |
+| TimesNet | <u>0.2594</u> | <u>0.4631</u> | <u>0.5620</u> | <u>0.6523</u> |
+| LightTS | 0.2953 | 0.4819 | 0.6138 | 0.7396 |
+| **BOREAS** | **0.2145** | **0.4179** | **0.4605** | **0.4970** |
 
-- Removing **IDRR** increases cs-pRMSE increasingly with horizon, from **1.4%** at one step to **7.3%** at 15 steps.
-- Replacing the **Recurrent Thermal-Context Updater** with a memoryless mapping produces a larger long-horizon degradation, reaching **14.2%** at 15 steps.
-- Replacing the **Heterogeneous-Entity Thermal Interaction Encoder** with a flat MLP increases cs-pRMSE by approximately **4.3%-5.9%** across the evaluated horizons.
+BOREAS achieves the lowest cs-pRMSE at every evaluated horizon. Its advantage becomes more pronounced as the rollout horizon increases, indicating lower recursive error amplification and stronger long-term state stability.
 
-## Hyperparameter Sensitivity
+Relative to the strongest time-series baseline, TimesNet, BOREAS reduces cs-pRMSE by:
 
-<p align="center">
-  <img src="assets/figure3_sensitivity.png" width="100%" alt="Hyperparameter sensitivity of BOREAS">
-</p>
+- 17.3% at \(H=1\);
+- 9.8% at \(H=5\);
+- 18.1% at \(H=10\); and
+- 23.8% at \(H=15\).
 
-The paper studies the depth and width of the heterogeneous-entity encoder, recurrent-state dimension, attention-head count, and transition-model width/depth. The adopted configuration uses a **64-dimensional heterogeneous-entity encoder**, a **256-dimensional recurrent thermal context**, and a **five-member ensemble**.
+The cs-pRMSE of BOREAS increases from 0.4179 at \(H=5\) to 0.4970 at \(H=15\), corresponding to an 18.9% increase. TimesNet increases from 0.4631 to 0.6523 over the same range, corresponding to a 40.9% increase.
 
-## Scope and Limitations
+## BOREAS Performance by Physical Group
 
-The current evaluation is based on operational data from a **single facility**. Recursive experiments use **recorded future control inputs and IT-load trajectories**, so they primarily evaluate recursive state propagation along observed operating trajectories.
+The following table reports physical-scale RMSE/MAE for BOREAS. Temperature errors are measured in degrees Celsius, while humidity errors are measured in percentage points.
 
-Accordingly, the current experiments do **not** establish reliable counterfactual accuracy for arbitrary, experimentally unvalidated action sequences, nor do they directly demonstrate post-deployment energy savings. Deployment decisions involving thermal safety or equipment limits still require facility-specific constraints, expert review, and independent safety mechanisms.
+| Output group | \(H=1\) | \(H=5\) | \(H=10\) | \(H=15\) |
+|---|---:|---:|---:|---:|
+| Cold-T | 0.4137 / 0.1877 | 0.8188 / 0.3929 | 0.8763 / 0.4612 | 0.9250 / 0.5101 |
+| Hot-T | 0.1275 / 0.0810 | 0.2524 / 0.1545 | 0.2989 / 0.1891 | 0.3169 / 0.2063 |
+| Cold-RH | 1.2725 / 0.5625 | 2.5520 / 1.1740 | 2.7177 / 1.3643 | 2.8487 / 1.4889 |
+| Hot-RH | 0.2410 / 0.1619 | 0.5145 / 0.3361 | 0.6678 / 0.4490 | 0.7522 / 0.5142 |
+| ACU LAT | 0.2114 / 0.0857 | 0.3524 / 0.1456 | 0.4123 / 0.1945 | 0.4821 / 0.2424 |
+| ACU EAT | 0.0897 / 0.0575 | 0.1584 / 0.0938 | 0.2162 / 0.1308 | 0.2765 / 0.1681 |
 
+BOREAS provides particularly strong performance on ACU thermal variables. This is important for control-oriented applications because ACU leaving-air and entering-air temperatures directly characterize the response of the cooling equipment.
 
+## Reproducibility Notes
 
+- All reported results use the same 10,985 contiguous test windows.
+- The 46 output channels are evaluated both individually and after aggregation into six physical groups.
+- Rollout metrics are pooled over steps \(1{:}H\), rather than computed only at the terminal step.
+- The final model does not use a multi-step rollout loss during training.
+- The reported main checkpoint corresponds to seed 0.
+- Across six independent BOREAS trainings, the \(H=15\) cs-pRMSE ranges from 0.4970 to 0.5285, indicating moderate sensitivity to random initialization.
+
+## Intended Applications
+
+BOREAS can be used as a learned thermal simulator for:
+
+- counterfactual evaluation of alternative cooling actions;
+- long-horizon control-policy validation;
+- model-predictive control;
+- offline reinforcement learning;
+- thermal-risk analysis under changing IT workloads; and
+- simulation-based cooling-system planning.
+
+The model is intended to support decision-making and policy evaluation. Operational control decisions should remain subject to engineering constraints and expert review.
