@@ -6,7 +6,6 @@
 
 <p align="center">
   <a href="https://huggingface.co/datasets/Fine6868/BOREAS"><b>Dataset</b></a>
-  &nbsp;|&nbsp;
 </p>
 
 <p align="center">
